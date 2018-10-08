@@ -197,10 +197,11 @@ namespace Test
             int numWindows = 10;
 
             var testFilteringParams = new FilteringParams(numPeaks, minRatio, numWindows, true, true);
-            List<(double mz, double intensity)> myPeaks = new List<(double mz, double intensity)>();
-
             // only 1 peak but 10 windows
-            myPeaks.Add((400, rand.Next(1000, 1000000)));
+            List<(double mz, double intensity)> myPeaks = new List<(double mz, double intensity)>
+            {
+                {(400, rand.Next(1000, 1000000)) }
+            };
 
             double[] intensities1 = myPeaks.Select(p => p.intensity).ToArray();
             double[] mz1 = myPeaks.Select(p => p.mz).ToArray();

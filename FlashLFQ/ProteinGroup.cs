@@ -20,6 +20,26 @@ namespace FlashLFQ
             intensities = new Dictionary<SpectraFileInfo, double>();
         }
 
+        public double GetIntensity(SpectraFileInfo fileInfo)
+        {
+            if (intensities.TryGetValue(fileInfo, out double intensity))
+            {
+                return intensity;
+            }
+            else
+            {
+                return 0;
+            }
+        }
+
+        public void SetIntensity(SpectraFileInfo fileInfo, double intensity)
+        {
+            if (intensities.ContainsKey(fileInfo))
+                intensities[fileInfo] = intensity;
+            else
+                intensities.Add(fileInfo, intensity);
+        }
+
         public static string TabSeparatedHeader(List<SpectraFileInfo> rawFiles)
         {
             var sb = new StringBuilder();

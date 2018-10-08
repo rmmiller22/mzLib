@@ -8,26 +8,28 @@ namespace Proteomics.ProteolyticDigestion
     /// Product of digesting a protein
     /// Contains methods for modified peptide combinitorics
     /// </summary>
-    public class Peptide
+    [Serializable]
+    public class ProteolyticPeptide
     {
-        private string _baseSequence;
+        protected string _baseSequence;
 
-        internal Peptide(Protein protein, int oneBasedStartResidueInProtein, int oneBasedEndResidueInProtein, int missedCleavages, string peptideDescription = null)
+        internal ProteolyticPeptide(Protein protein, int oneBasedStartResidueInProtein, int oneBasedEndResidueInProtein, int missedCleavages, CleavageSpecificity cleavageSpecificityForFdrCategory, string peptideDescription = null)
         {
-            Protein = protein;
+            _protein = protein;
             OneBasedStartResidueInProtein = oneBasedStartResidueInProtein;
             OneBasedEndResidueInProtein = oneBasedEndResidueInProtein;
-            Length = OneBasedEndResidueInProtein - OneBasedStartResidueInProtein + 1;
             MissedCleavages = missedCleavages;
+            CleavageSpecificityForFdrCategory = cleavageSpecificityForFdrCategory;
             PeptideDescription = peptideDescription;
         }
 
-        public Protein Protein { get; }// protein from which this peptide came
-        public int OneBasedStartResidueInProtein { get; }// if the first residue in a protein is 1 this is the number of the residue at which the peptide begins
-        public int OneBasedEndResidueInProtein { get; }// if the first residue in a protien is 1 this is the number of the residue at which the peptide ends
-        public int MissedCleavages { get; set; }// the number of missed cleavages this peptide has considerign what protease was supposed to generate it?
-        public string PeptideDescription { get; }
-        public int Length { get; }//how many residues llong the peptide is (calculated from oneBased Starts and End Residues)
+        [NonSerialized] private Protein _protein; // protein that this peptide is a digestion product of
+        public int OneBasedStartResidueInProtein { get; } // the residue number at which the peptide begins (the first residue in a protein is 1)
+        public int OneBasedEndResidueInProtein { get; } // the residue number at which the peptide ends
+        public int MissedCleavages { get; } // the number of missed cleavages this peptide has with respect to the digesting protease
+        public string PeptideDescription { get; internal set; } //unstructured explanation of source
+        public CleavageSpecificity CleavageSpecificityForFdrCategory { get; internal set; } //structured explanation of source
+        public int Length { get { return BaseSequence.Length; } } //how many residues long the peptide is
 
         public virtual char PreviousAminoAcid
         {
@@ -45,13 +47,19 @@ namespace Proteomics.ProteolyticDigestion
             }
         }
 
+        public Protein Protein
+        {
+            get { return _protein; }
+            protected set { _protein = value; }
+        }
+
         public string BaseSequence
         {
             get
             {
                 if (_baseSequence == null)
                 {
-                    _baseSequence = Protein.BaseSequence.Substring(OneBasedStartResidueInProtein - 1, Length);
+                    _baseSequence = Protein.BaseSequence.Substring(OneBasedStartResidueInProtein - 1, OneBasedEndResidueInProtein - OneBasedStartResidueInProtein + 1);
                 }
                 return _baseSequence;
             }
@@ -61,10 +69,9 @@ namespace Proteomics.ProteolyticDigestion
         {
             get
             {
-                return Protein.BaseSequence[zeroBasedIndex + OneBasedStartResidueInProtein - 1];
+                return BaseSequence[zeroBasedIndex];
             }
         }
-
 
         /// <summary>
         /// Gets the peptides for a specific protein interval
@@ -74,21 +81,21 @@ namespace Proteomics.ProteolyticDigestion
         /// <param name="digestionParams"></param>
         /// <param name="variableModifications"></param>
         /// <returns></returns>
-        internal IEnumerable<PeptideWithSetModifications> GetModifiedPeptides(IEnumerable<ModificationWithMass> allKnownFixedModifications,
-            DigestionParams digestionParams, List<ModificationWithMass> variableModifications)
+        internal IEnumerable<PeptideWithSetModifications> GetModifiedPeptides(IEnumerable<Modification> allKnownFixedModifications,
+            DigestionParams digestionParams, List<Modification> variableModifications)
         {
             int peptideLength = OneBasedEndResidueInProtein - OneBasedStartResidueInProtein + 1;
             int maximumVariableModificationIsoforms = digestionParams.MaxModificationIsoforms;
             int maxModsForPeptide = digestionParams.MaxModsForPeptide;
-            var twoBasedPossibleVariableAndLocalizeableModifications = new Dictionary<int, List<ModificationWithMass>>(peptideLength + 4);
+            var twoBasedPossibleVariableAndLocalizeableModifications = new Dictionary<int, List<Modification>>(peptideLength + 4);
 
-            var pepNTermVariableMods = new List<ModificationWithMass>();
+            var pepNTermVariableMods = new List<Modification>();
             twoBasedPossibleVariableAndLocalizeableModifications.Add(1, pepNTermVariableMods);
 
-            var pepCTermVariableMods = new List<ModificationWithMass>();
+            var pepCTermVariableMods = new List<Modification>();
             twoBasedPossibleVariableAndLocalizeableModifications.Add(peptideLength + 2, pepCTermVariableMods);
 
-            foreach (ModificationWithMass variableModification in variableModifications)
+            foreach (Modification variableModification in variableModifications)
             {
                 // Check if can be a n-term mod
                 if (CanBeNTerminalMod(variableModification, peptideLength))
@@ -98,12 +105,12 @@ namespace Proteomics.ProteolyticDigestion
 
                 for (int r = 0; r < peptideLength; r++)
                 {
-                    if (ModificationLocalization.ModFits(variableModification, Protein, r + 1, peptideLength, OneBasedStartResidueInProtein + r)
-                        && variableModification.terminusLocalization == TerminusLocalization.Any)
+                    if (ModificationLocalization.ModFits(variableModification, Protein.BaseSequence, r + 1, peptideLength, OneBasedStartResidueInProtein + r)
+                        && variableModification.LocationRestriction == "Anywhere.")
                     {
-                        if (!twoBasedPossibleVariableAndLocalizeableModifications.TryGetValue(r + 2, out List<ModificationWithMass> residueVariableMods))
+                        if (!twoBasedPossibleVariableAndLocalizeableModifications.TryGetValue(r + 2, out List<Modification> residueVariableMods))
                         {
-                            residueVariableMods = new List<ModificationWithMass> { variableModification };
+                            residueVariableMods = new List<Modification> { variableModification };
                             twoBasedPossibleVariableAndLocalizeableModifications.Add(r + 2, residueVariableMods);
                         }
                         else
@@ -131,7 +138,7 @@ namespace Proteomics.ProteolyticDigestion
                 int locInPeptide = kvp.Key - OneBasedStartResidueInProtein + 1;
                 foreach (Modification modWithMass in kvp.Value)
                 {
-                    if (modWithMass is ModificationWithMass variableModification)
+                    if (modWithMass is Modification variableModification)
                     {
                         // Check if can be a n-term mod
                         if (locInPeptide == 1 && CanBeNTerminalMod(variableModification, peptideLength) && !Protein.IsDecoy)
@@ -142,12 +149,12 @@ namespace Proteomics.ProteolyticDigestion
                         int r = locInPeptide - 1;
                         if (r >= 0 && r < peptideLength
                             && (Protein.IsDecoy ||
-                            (ModificationLocalization.ModFits(variableModification, Protein, r + 1, peptideLength, OneBasedStartResidueInProtein + r)
-                                && variableModification.terminusLocalization == TerminusLocalization.Any)))
+                            (ModificationLocalization.ModFits(variableModification, Protein.BaseSequence, r + 1, peptideLength, OneBasedStartResidueInProtein + r)
+                                && variableModification.LocationRestriction == "Anywhere.")))
                         {
-                            if (!twoBasedPossibleVariableAndLocalizeableModifications.TryGetValue(r + 2, out List<ModificationWithMass> residueVariableMods))
+                            if (!twoBasedPossibleVariableAndLocalizeableModifications.TryGetValue(r + 2, out List<Modification> residueVariableMods))
                             {
-                                residueVariableMods = new List<ModificationWithMass> { variableModification };
+                                residueVariableMods = new List<Modification> { variableModification };
                                 twoBasedPossibleVariableAndLocalizeableModifications.Add(r + 2, residueVariableMods);
                             }
                             else
@@ -167,7 +174,7 @@ namespace Proteomics.ProteolyticDigestion
 
             int variable_modification_isoforms = 0;
 
-            foreach (Dictionary<int, ModificationWithMass> kvp in GetVariableModificationPatterns(twoBasedPossibleVariableAndLocalizeableModifications, maxModsForPeptide, peptideLength))
+            foreach (Dictionary<int, Modification> kvp in GetVariableModificationPatterns(twoBasedPossibleVariableAndLocalizeableModifications, maxModsForPeptide, peptideLength))
             {
                 int numFixedMods = 0;
                 foreach (var ok in GetFixedModsOneIsNterminus(peptideLength, allKnownFixedModifications))
@@ -179,7 +186,7 @@ namespace Proteomics.ProteolyticDigestion
                     }
                 }
                 yield return new PeptideWithSetModifications(Protein, digestionParams, OneBasedStartResidueInProtein, OneBasedEndResidueInProtein,
-                    PeptideDescription, MissedCleavages, kvp, numFixedMods);
+                    CleavageSpecificityForFdrCategory, PeptideDescription, MissedCleavages, kvp, numFixedMods);
                 variable_modification_isoforms++;
                 if (variable_modification_isoforms == maximumVariableModificationIsoforms)
                 {
@@ -194,10 +201,10 @@ namespace Proteomics.ProteolyticDigestion
         /// <param name="variableModification"></param>
         /// <param name="peptideLength"></param>
         /// <returns></returns>
-        private bool CanBeNTerminalMod(ModificationWithMass variableModification, int peptideLength)
+        private bool CanBeNTerminalMod(Modification variableModification, int peptideLength)
         {
-            return ModificationLocalization.ModFits(variableModification, Protein, 1, peptideLength, OneBasedStartResidueInProtein)
-                && (variableModification.terminusLocalization == TerminusLocalization.NProt || variableModification.terminusLocalization == TerminusLocalization.NPep);
+            return ModificationLocalization.ModFits(variableModification, Protein.BaseSequence, 1, peptideLength, OneBasedStartResidueInProtein)
+                && (variableModification.LocationRestriction == "N-terminal." || variableModification.LocationRestriction == "Peptide N-terminal.");
         }
 
         /// <summary>
@@ -206,13 +213,13 @@ namespace Proteomics.ProteolyticDigestion
         /// <param name="variableModification"></param>
         /// <param name="peptideLength"></param>
         /// <returns></returns>
-        private bool CanBeCTerminalMod(ModificationWithMass variableModification, int peptideLength)
+        private bool CanBeCTerminalMod(Modification variableModification, int peptideLength)
         {
-            return ModificationLocalization.ModFits(variableModification, Protein, peptideLength, peptideLength, OneBasedStartResidueInProtein + peptideLength - 1)
-                && (variableModification.terminusLocalization == TerminusLocalization.ProtC || variableModification.terminusLocalization == TerminusLocalization.PepC);
+            return ModificationLocalization.ModFits(variableModification, Protein.BaseSequence, peptideLength, peptideLength, OneBasedStartResidueInProtein + peptideLength - 1)
+                && (variableModification.LocationRestriction == "C-terminal." || variableModification.LocationRestriction == "Peptide C-terminal.");
         }
 
-        private static IEnumerable<Dictionary<int, ModificationWithMass>> GetVariableModificationPatterns(Dictionary<int, List<ModificationWithMass>> possibleVariableModifications, int maxModsForPeptide, int peptideLength)
+        private static IEnumerable<Dictionary<int, Modification>> GetVariableModificationPatterns(Dictionary<int, List<Modification>> possibleVariableModifications, int maxModsForPeptide, int peptideLength)
         {
             if (possibleVariableModifications.Count == 0)
             {
@@ -220,13 +227,13 @@ namespace Proteomics.ProteolyticDigestion
             }
             else
             {
-                var possible_variable_modifications = new Dictionary<int, List<ModificationWithMass>>(possibleVariableModifications);
+                var possible_variable_modifications = new Dictionary<int, List<Modification>>(possibleVariableModifications);
 
                 int[] base_variable_modification_pattern = new int[peptideLength + 4];
                 var totalAvailableMods = possible_variable_modifications.Sum(b => b.Value == null ? 0 : b.Value.Count);
                 for (int variable_modifications = 0; variable_modifications <= Math.Min(totalAvailableMods, maxModsForPeptide); variable_modifications++)
                 {
-                    foreach (int[] variable_modification_pattern in GetVariableModificationPatterns(new List<KeyValuePair<int, List<ModificationWithMass>>>(possible_variable_modifications),
+                    foreach (int[] variable_modification_pattern in GetVariableModificationPatterns(new List<KeyValuePair<int, List<Modification>>>(possible_variable_modifications),
                         possible_variable_modifications.Count - variable_modifications, base_variable_modification_pattern, 0))
                     {
                         yield return GetNewVariableModificationPattern(variable_modification_pattern, possible_variable_modifications);
@@ -235,7 +242,7 @@ namespace Proteomics.ProteolyticDigestion
             }
         }
 
-        private static IEnumerable<int[]> GetVariableModificationPatterns(List<KeyValuePair<int, List<ModificationWithMass>>> possibleVariableModifications,
+        private static IEnumerable<int[]> GetVariableModificationPatterns(List<KeyValuePair<int, List<Modification>>> possibleVariableModifications,
             int unmodifiedResiduesDesired, int[] variableModificationPattern, int index)
         {
             if (index < possibleVariableModifications.Count - 1)
@@ -280,12 +287,12 @@ namespace Proteomics.ProteolyticDigestion
             }
         }
 
-        private static Dictionary<int, ModificationWithMass> GetNewVariableModificationPattern(int[] variableModificationArray,
-            IEnumerable<KeyValuePair<int, List<ModificationWithMass>>> possibleVariableModifications)
+        private static Dictionary<int, Modification> GetNewVariableModificationPattern(int[] variableModificationArray,
+            IEnumerable<KeyValuePair<int, List<Modification>>> possibleVariableModifications)
         {
-            var modification_pattern = new Dictionary<int, ModificationWithMass>();
+            var modification_pattern = new Dictionary<int, Modification>();
 
-            foreach (KeyValuePair<int, List<ModificationWithMass>> kvp in possibleVariableModifications)
+            foreach (KeyValuePair<int, List<Modification>> kvp in possibleVariableModifications)
             {
                 if (variableModificationArray[kvp.Key] > 0)
                 {
@@ -296,35 +303,35 @@ namespace Proteomics.ProteolyticDigestion
             return modification_pattern;
         }
 
-        private Dictionary<int, ModificationWithMass> GetFixedModsOneIsNterminus(int peptideLength,
-            IEnumerable<ModificationWithMass> allKnownFixedModifications)
+        private Dictionary<int, Modification> GetFixedModsOneIsNterminus(int peptideLength,
+            IEnumerable<Modification> allKnownFixedModifications)
         {
-            var fixedModsOneIsNterminus = new Dictionary<int, ModificationWithMass>(peptideLength + 3);
-            foreach (ModificationWithMass mod in allKnownFixedModifications)
+            var fixedModsOneIsNterminus = new Dictionary<int, Modification>(peptideLength + 3);
+            foreach (Modification mod in allKnownFixedModifications)
             {
-                switch (mod.terminusLocalization)
+                switch (mod.LocationRestriction)
                 {
-                    case TerminusLocalization.NProt:
-                    case TerminusLocalization.NPep:
-                        if (ModificationLocalization.ModFits(mod, Protein, 1, peptideLength, OneBasedStartResidueInProtein))
+                    case "N-terminal.":
+                    case "Peptide N-terminal.":
+                        if (ModificationLocalization.ModFits(mod, Protein.BaseSequence, 1, peptideLength, OneBasedStartResidueInProtein))
                         {
                             fixedModsOneIsNterminus[1] = mod;
                         }
                         break;
 
-                    case TerminusLocalization.Any:
+                    case "Anywhere.":
                         for (int i = 2; i <= peptideLength + 1; i++)
                         {
-                            if (ModificationLocalization.ModFits(mod, Protein, i - 1, peptideLength, OneBasedStartResidueInProtein + i - 2))
+                            if (ModificationLocalization.ModFits(mod, Protein.BaseSequence, i - 1, peptideLength, OneBasedStartResidueInProtein + i - 2))
                             {
                                 fixedModsOneIsNterminus[i] = mod;
                             }
                         }
                         break;
 
-                    case TerminusLocalization.PepC:
-                    case TerminusLocalization.ProtC:
-                        if (ModificationLocalization.ModFits(mod, Protein, peptideLength, peptideLength, OneBasedStartResidueInProtein + peptideLength - 1))
+                    case "C-terminal.":
+                    case "Peptide C-terminal.":
+                        if (ModificationLocalization.ModFits(mod, Protein.BaseSequence, peptideLength, peptideLength, OneBasedStartResidueInProtein + peptideLength - 1))
                         {
                             fixedModsOneIsNterminus[peptideLength + 2] = mod;
                         }
@@ -336,6 +343,5 @@ namespace Proteomics.ProteolyticDigestion
             }
             return fixedModsOneIsNterminus;
         }
-
     }
 }

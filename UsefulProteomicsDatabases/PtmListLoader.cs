@@ -1,4 +1,5 @@
 ﻿using Chemistry;
+using MassSpectrometry;
 using MzLibUtil;
 using Proteomics;
 using System;
@@ -11,11 +12,11 @@ namespace UsefulProteomicsDatabases
 {
     public static class PtmListLoader
     {
-        private static readonly Dictionary<string, char> aminoAcidCodes;
+        private static readonly Dictionary<string, char> AminoAcidCodes;
 
         static PtmListLoader()
         {
-            aminoAcidCodes = new Dictionary<string, char>
+            AminoAcidCodes = new Dictionary<string, char>
             {
                 { "Alanine", 'A' },
                 { "Arginine", 'R' },
@@ -34,6 +35,8 @@ namespace UsefulProteomicsDatabases
                 { "Methionine", 'M' },
                 { "Phenylalanine", 'F' },
                 { "Proline", 'P' },
+                { "Pyrrolysine", 'O' },
+                { "Selenocysteine", 'U' },
                 { "Serine", 'S' },
                 { "Threonine", 'T' },
                 { "Tryptophan", 'W' },
@@ -42,9 +45,14 @@ namespace UsefulProteomicsDatabases
             };
         }
 
-        public static IEnumerable<Modification> ReadModsFromFile(string ptmListLocation)
+        /// <summary>
+        /// Read a list of modifications from a text file.
+        /// </summary>
+        /// <param name="ptmListLocation"></param>
+        /// <returns></returns>
+        public static IEnumerable<Modification> ReadModsFromFile(string ptmListLocation, out List<(Modification, string)> filteredModificationsWithWarnings)
         {
-            return ReadModsFromFile(ptmListLocation, new Dictionary<string, int>()).OrderBy(b=>b.id);
+            return ReadModsFromFile(ptmListLocation, new Dictionary<string, int>(), out filteredModificationsWithWarnings).OrderBy(b => b.IdWithMotif);
         }
 
         /// <summary>
@@ -52,25 +60,38 @@ namespace UsefulProteomicsDatabases
         /// </summary>
         /// <param name="ptmListLocation"></param>
         /// <returns></returns>
-        public static IEnumerable<Modification> ReadModsFromFile(string ptmListLocation, Dictionary<string, int> formalChargesDictionary)
+        public static IEnumerable<Modification> ReadModsFromFile(string ptmListLocation, Dictionary<string, int> formalChargesDictionary, out List<(Modification, string)> filteredModificationsWithWarnings)
         {
+            List<Modification> acceptedModifications = new List<Modification>();
+            filteredModificationsWithWarnings = new List<(Modification filteredMod, string warningString)>();
             using (StreamReader uniprot_mods = new StreamReader(ptmListLocation))
             {
                 List<string> modification_specification = new List<string>();
 
-                while (uniprot_mods.Peek() != -1)
+                //This block will read one complete modification entry at a time until the EOF is reached.
+                while (uniprot_mods.Peek() != -1) //The Peek method returns an integer value in order to determine whether the end of the file, or another error has occurred.
                 {
                     string line = uniprot_mods.ReadLine();
                     modification_specification.Add(line);
                     if (line.StartsWith("//"))
                     {
-                        foreach (var mod in ReadMod(modification_specification, formalChargesDictionary))
-                            yield return mod;
+                        foreach (var mod in ReadMod(ptmListLocation, modification_specification, formalChargesDictionary))
+                        {
+                            // Filter out the modifications that don't meet validation
+                            if (mod.ValidModification)
+                            {
+                                acceptedModifications.Add(mod);
+                            }
+                            else
+                            {
+                                filteredModificationsWithWarnings.Add((mod, mod.ModificationErrorsToString()));
+                            }
+                        }
                         modification_specification = new List<string>();
                     }
                 }
-
             }
+            return acceptedModifications;
         }
 
         /// <summary>
@@ -78,8 +99,10 @@ namespace UsefulProteomicsDatabases
         /// </summary>
         /// <param name="storedModifications"></param>
         /// <returns></returns>
-        public static IEnumerable<Modification> ReadModsFromString(string storedModifications)
+        public static IEnumerable<Modification> ReadModsFromString(string storedModifications, out List<(Modification, string)> filteredModificationsWithWarnings)
         {
+            List<Modification> acceptedModifications = new List<Modification>();
+            filteredModificationsWithWarnings = new List<(Modification filteredMod, string warningString)>();
             using (StringReader uniprot_mods = new StringReader(storedModifications))
             {
                 List<string> modification_specification = new List<string>();
@@ -90,206 +113,369 @@ namespace UsefulProteomicsDatabases
                     modification_specification.Add(line);
                     if (line.StartsWith("//"))
                     {
-                        foreach (var mod in ReadMod(modification_specification, new Dictionary<string, int>()))
-                            yield return mod;
+                        foreach (var mod in ReadMod(null, modification_specification, new Dictionary<string, int>()))
+                        {
+                            // Filter out the modifications that don't meet validation
+                            if (mod.ValidModification)
+                            {
+                                acceptedModifications.Add(mod);
+                            }
+                            else
+                            {
+                                filteredModificationsWithWarnings.Add((mod, mod.ModificationErrorsToString()));
+                            }
+                        }
                         modification_specification = new List<string>();
                     }
                 }
             }
+            return acceptedModifications;
         }
 
         /// <summary>
-        /// Get a ModificationWithLocation from string representations of a modification specification. Returns null if the string representation is not recognized.
+        /// Parse modification from string representation
         /// </summary>
+        /// <param name="ptmListLocation"></param>
         /// <param name="specification"></param>
+        /// <param name="formalChargesDictionary"></param>
         /// <returns></returns>
-        private static IEnumerable<Modification> ReadMod(List<string> specification, Dictionary<string, int> formalChargesDictionary)
+        private static IEnumerable<Modification> ReadMod(string ptmListLocation, List<string> specification, Dictionary<string, int> formalChargesDictionary)
         {
-            // UniProt-specific fields
-            string uniprotAC = null;
-            string uniprotFT = null;
-
-            // Other fields
-            string id = null;
-            List<string> motifs = null;
-            string terminusLocalizationString = null;
-            ChemicalFormula correctionFormula = null;
-            double? monoisotopicMass = null;
-            var externalDatabaseLinks = new Dictionary<string, IList<string>>();
-            List<string> keywords = null;
-
-            // Custom fields
-            List<double> neutralLosses = null;
-            List<double> diagnosticIons = null;
-            string modificationType = null;
+            string _id = null;
+            string _accession = null;
+            string _modificationType = null;
+            string _featureType = null;
+            List<ModificationMotif> _target = null;
+            string _locationRestriction = null; //constructor will convert this to enum type
+            ChemicalFormula _chemicalFormula = null;
+            double? _monoisotopicMass = null;
+            Dictionary<string, IList<string>> _databaseReference = null;
+            Dictionary<string, IList<string>> _taxonomicRange = null;
+            List<string> _keywords = null;
+            Dictionary<DissociationType, List<double>> _neutralLosses = null;
+            Dictionary<DissociationType, List<double>> _diagnosticIons = null;
+            string _fileOrigin = ptmListLocation;
 
             foreach (string line in specification)
             {
                 if (line.Length >= 2)
                 {
-                    switch (line.Substring(0, 2))
+                    string modKey = line.Substring(0, 2);
+                    string modValue = null;
+                    if (line.Length > 5)
+                    {
+                        try
+                        {
+                            modValue = line.Split('#')[0].Trim().Substring(5); //removes commented text
+                        }
+                        catch
+                        {
+                            //do nothing leave as null
+                        }
+                    }
+
+                    switch (modKey)
                     {
                         case "ID": // Mandatory
-                            id = line.Substring(5);
+                            _id = modValue;
                             break;
 
                         case "AC": // Do not use! Only present in UniProt ptmlist
-                            uniprotAC = line.Substring(5);
+                            _accession = modValue;
+                            _modificationType = "UniProt";
                             break;
 
                         case "FT": // Optional
-                            uniprotFT = line.Substring(5);
+                            _featureType = modValue;
                             break;
 
                         case "TG": // Which amino acid(s) or motifs is the modification on
-                            motifs = new List<string>(line.Substring(5).TrimEnd('.').Split(new string[] { " or " }, StringSplitOptions.None));
+                            string[] possibleMotifs = modValue.TrimEnd('.').Split(new string[] { " or " }, StringSplitOptions.None);
+                            List<ModificationMotif> acceptableMotifs = new List<ModificationMotif>();
+                            foreach (var singleTarget in possibleMotifs)
+                            {
+                                string theMotif;
+                                if (AminoAcidCodes.TryGetValue(singleTarget, out char possibleMotifChar))
+                                {
+                                    theMotif = possibleMotifChar.ToString();
+                                }
+                                else
+                                {
+                                    theMotif = singleTarget;
+                                }
+                                if (ModificationMotif.TryGetMotif(theMotif, out ModificationMotif motif))
+                                {
+                                    acceptableMotifs.Add(motif);
+                                }
+                            }
+                            _target = acceptableMotifs.ToList();
                             break;
 
                         case "PP": // Terminus localization
-                            terminusLocalizationString = line.Substring(5);
+                            _locationRestriction = modValue;
                             break;
 
                         case "CF": // Correction formula
-                            correctionFormula = ChemicalFormula.ParseFormula(line.Substring(5).Replace(" ", string.Empty));
+                            _chemicalFormula = ChemicalFormula.ParseFormula(modValue.Replace(" ", string.Empty));
                             break;
 
                         case "MM": // Monoisotopic mass difference. Might not precisely correspond to formula!
+                            if (!double.TryParse(modValue, NumberStyles.Any, CultureInfo.InvariantCulture, out double thisMM))
                             {
-                                if (!double.TryParse(line.Substring(5), NumberStyles.Any, CultureInfo.InvariantCulture, out double thisMM))
-                                    throw new MzLibException(line.Substring(5) + " is not a valid monoisotopic mass");
-                                monoisotopicMass = thisMM;
+                                throw new MzLibException(line.Substring(5) + " is not a valid monoisotopic mass");
                             }
+                            _monoisotopicMass = thisMM;
                             break;
 
                         case "DR": // External database links!
+                            var splitStringDR = modValue.TrimEnd('.').Split(new string[] { "; " }, StringSplitOptions.None);
+                            try
                             {
-                                var splitString = line.Substring(5).TrimEnd('.').Split(new string[] { "; " }, StringSplitOptions.None);
-                                if (externalDatabaseLinks.TryGetValue(splitString[0], out IList<string> val))
-                                    val.Add(splitString[1]);
+                                _databaseReference.TryGetValue(splitStringDR[0], out IList<string> val);
+                                val.Add(splitStringDR[1]);
+                            }
+                            catch
+                            {
+                                if (_databaseReference == null)
+                                {
+                                    _databaseReference = new Dictionary<string, IList<string>>();
+                                    _databaseReference.Add(splitStringDR[0], new List<string> { splitStringDR[1] });
+                                }
                                 else
-                                    externalDatabaseLinks.Add(splitString[0], new List<string> { splitString[1] });
+                                {
+                                    _databaseReference.Add(splitStringDR[0], new List<string> { splitStringDR[1] });
+                                }
+                            }
+                            break;
+
+                        case "TR": // External database links!
+                            var splitStringTR = modValue.TrimEnd('.').Split(new string[] { "; " }, StringSplitOptions.None);
+                            try
+                            {
+                                _taxonomicRange.TryGetValue(splitStringTR[0], out IList<string> val);
+                                val.Add(splitStringTR[1]);
+                            }
+                            catch
+                            {
+                                if (_taxonomicRange == null)
+                                {
+                                    _taxonomicRange = new Dictionary<string, IList<string>>();
+                                    _taxonomicRange.Add(splitStringTR[0], new List<string> { splitStringTR[1] });
+                                }
+                                else
+                                {
+                                    _taxonomicRange.Add(splitStringTR[0], new List<string> { splitStringTR[1] });
+                                }
                             }
                             break;
 
                         case "KW": // ; Separated keywords
-                            {
-                                keywords = new List<string>(line.Substring(5).TrimEnd('.').Split(new string[] { "; " }, StringSplitOptions.None));
-                            }
+                            _keywords = new List<string>(modValue.TrimEnd('.').Split(new string[] { "; " }, StringSplitOptions.None));
                             break;
 
                         // NOW CUSTOM FIELDS:
 
-                        case "NL": // Netural Losses. If field doesn't exist, single equal to 0
-                            try
+                        case "NL": // Netural Losses. when field doesn't exist, single equal to 0. these must all be on one line;
+                            if (_neutralLosses.IsNullOrEmpty())
                             {
-                                neutralLosses = new List<double>(line.Substring(5).Split(new string[] { " or " }, StringSplitOptions.RemoveEmptyEntries).Select(b => ChemicalFormula.ParseFormula(b).MonoisotopicMass));
+                                _neutralLosses = new Dictionary<DissociationType, List<double>>();
                             }
-                            catch (MzLibException)
-                            {
-                                neutralLosses = new List<double>(line.Substring(5).Split(new string[] { " or " }, StringSplitOptions.RemoveEmptyEntries).Select(b => double.Parse(b, CultureInfo.InvariantCulture)));
-                            }
+                            _neutralLosses = DiagnosticIonsAndNeutralLosses(modValue, _neutralLosses);
                             break;
 
                         case "DI": // Masses of diagnostic ions. Might just be "DI"!!! If field doesn't exist, create an empty list!
-                            try
+                            if (_diagnosticIons.IsNullOrEmpty())
                             {
-                                diagnosticIons = new List<double>(line.Substring(5).Split(new string[] { " or " }, StringSplitOptions.RemoveEmptyEntries).Select(b => ChemicalFormula.ParseFormula(b).MonoisotopicMass));
+                                _diagnosticIons = new Dictionary<DissociationType, List<double>>();
                             }
-                            catch (MzLibException)
-                            {
-                                diagnosticIons = new List<double>(line.Substring(5).Split(new string[] { " or " }, StringSplitOptions.RemoveEmptyEntries).Select(b => double.Parse(b, CultureInfo.InvariantCulture)));
-                            }
+                            _diagnosticIons = DiagnosticIonsAndNeutralLosses(modValue, _diagnosticIons);
                             break;
 
                         case "MT": // Modification Type. If the field doesn't exist, set to the database name
-                            modificationType = line.Substring(5);
+                            _modificationType = modValue;
                             break;
 
                         case "//":
-                            if (id == null)
-                                throw new MzLibException("id is null");
-                            if ("CROSSLNK".Equals(uniprotFT)) // Ignore crosslinks
-                                break;
-                            if (uniprotAC != null)
+                            if (_target == null || _target.Count == 0) //This happens for FT=CROSSLINK modifications. We ignore these for now.
                             {
-                                modificationType = "UniProt";
-                                externalDatabaseLinks.Add("UniProt", new List<string> { uniprotAC });
+                                _target = new List<ModificationMotif> { null };
                             }
-                            if (modificationType == null)
-                                throw new MzLibException("modificationType of " + id + " is null");
-                            if (!monoisotopicMass.HasValue && correctionFormula != null)
-                                monoisotopicMass = correctionFormula.MonoisotopicMass;
-
-                            foreach (var dbAndAccession in externalDatabaseLinks.SelectMany(b => b.Value.Select(c => b.Key + "; " + c)))
-                                if (formalChargesDictionary.ContainsKey(dbAndAccession))
-                                {
-                                    if (monoisotopicMass.HasValue)
-                                        monoisotopicMass -= formalChargesDictionary[dbAndAccession] * Constants.ProtonMass;
-                                    if (correctionFormula != null)
-                                        correctionFormula.Remove(PeriodicTable.GetElement("H"), formalChargesDictionary[dbAndAccession]);
-                                    break;
-                                }
-                            if (terminusLocalizationString == null || motifs == null)
-                                yield return new Modification(id, modificationType);
-                            else if (ModificationWithLocation.terminusLocalizationTypeCodes.TryGetValue(terminusLocalizationString, out TerminusLocalization terminusLocalization))
+                            foreach (ModificationMotif motif in _target)
                             {
-                                foreach (var singleTarget in motifs)
+                                bool useChemFormulaForMM = _monoisotopicMass == null && _chemicalFormula != null;
+                                bool adjustWithFormalCharge = _monoisotopicMass != null && _databaseReference != null;
+                                if (useChemFormulaForMM)
                                 {
-                                    string theMotif;
-                                    if (aminoAcidCodes.TryGetValue(singleTarget, out char possibleMotifChar))
-                                        theMotif = possibleMotifChar.ToString();
-                                    else
-                                        theMotif = singleTarget;
-                                    if (ModificationMotif.TryGetMotif(theMotif, out ModificationMotif motif))
-                                    {
-                                        var idToUse = id;
-                                        // Augment id if mulitple motifs!
-                                        // Add id to keywords
-                                        if (motifs.Count != 1)
-                                        {
-                                            if (keywords == null)
-                                                keywords = new List<string> { id };
-                                            else
-                                                keywords.Add(id);
-                                            idToUse += " on " + motif;
-                                        }
-
-                                        // Add the modification!
-
-                                        if (!monoisotopicMass.HasValue)
-                                        {
-                                            // Return modification
-                                            yield return new ModificationWithLocation(idToUse, modificationType, motif, terminusLocalization, externalDatabaseLinks, keywords);
-                                        }
-                                        else
-                                        {
-                                            if (correctionFormula == null)
-                                            {
-                                                // Return modification with mass
-                                                yield return new ModificationWithMass(idToUse, modificationType, motif, terminusLocalization, monoisotopicMass.Value, externalDatabaseLinks,
-                                                    keywords,
-                                                    neutralLosses,
-                                                    diagnosticIons);
-                                            }
-                                            else
-                                            {
-                                                // Return modification with complete information!
-                                                yield return new ModificationWithMassAndCf(idToUse, modificationType, motif, terminusLocalization, correctionFormula, monoisotopicMass.Value, externalDatabaseLinks, keywords,
-                                                    neutralLosses,
-                                                    diagnosticIons);
-                                            }
-                                        }
-                                    }
-                                    else
-                                        throw new MzLibException("Could not get motif from " + singleTarget);
+                                    _monoisotopicMass = _chemicalFormula.MonoisotopicMass;
                                 }
+                                if (adjustWithFormalCharge)
+                                {
+                                    _monoisotopicMass = AdjustMonoIsotopicMassForFormalCharge(_monoisotopicMass, _chemicalFormula, _databaseReference, formalChargesDictionary);
+                                }
+                                yield return new Modification(_id, _accession, _modificationType, _featureType, motif, _locationRestriction, _chemicalFormula, _monoisotopicMass, _databaseReference, _taxonomicRange, _keywords, _neutralLosses, _diagnosticIons, _fileOrigin);
                             }
-                            else
-                                throw new MzLibException("Could not get modification site from " + terminusLocalizationString);
+                            break;
+
+                        default:
                             break;
                     }
                 }
             }
+        }
+
+        private static bool IsNullOrEmpty<T, U>(this IDictionary<T, U> Dictionary)
+        {
+            return (Dictionary == null || Dictionary.Count < 1);
+        }
+
+        /// <summary>
+        /// Subtract the mass of a proton for every formal charge on a modification.
+        /// </summary>
+        /// <param name="_monoisotopicMass"></param>
+        /// <param name="_chemicalFormula"></param>
+        /// <param name="_databaseReference"></param>
+        /// <param name="formalChargesDictionary"></param>
+        /// <returns></returns>
+        private static double AdjustMonoIsotopicMassForFormalCharge(double? _monoisotopicMass, ChemicalFormula _chemicalFormula, Dictionary<string, IList<string>> _databaseReference, Dictionary<string, int> formalChargesDictionary)
+        {
+            foreach (var dbAndAccession in _databaseReference.SelectMany(b => b.Value.Select(c => b.Key + "; " + c)))
+            {
+                if (formalChargesDictionary.ContainsKey(dbAndAccession))
+                {
+                    if (_monoisotopicMass.HasValue)
+                    {
+                        _monoisotopicMass -= formalChargesDictionary[dbAndAccession] * Constants.ProtonMass;
+                    }
+                    if (_chemicalFormula != null)
+                    {
+                        _chemicalFormula.Remove(PeriodicTable.GetElement("H"), formalChargesDictionary[dbAndAccession]);
+                    }
+                    break;
+                }
+            }
+            return (double)_monoisotopicMass;
+        }
+
+        /// <summary>
+        /// Parse dissociation type string
+        /// </summary>
+        /// <param name="modType"></param>
+        /// <returns></returns>
+        public static DissociationType? ModDissociationType(string modType)
+        {
+            switch (modType)
+            {
+                case "Any":
+                    return DissociationType.AnyActivationType;
+
+                case "CID":
+                    return DissociationType.CID;
+
+                case "MPD":
+                    return DissociationType.IRMPD;
+
+                case "ECD":
+                    return DissociationType.ECD;
+
+                case "PQD":
+                    return DissociationType.PQD;
+
+                case "ETD":
+                    return DissociationType.ETD;
+
+                case "HCD":
+                    return DissociationType.HCD;
+
+                case "EThcD":
+                    return DissociationType.EThcD;
+
+                case "Custom":
+                    return DissociationType.Custom;
+
+                default:
+                    return null;
+            }
+        }
+
+        /// <summary>
+        /// Parse diagnostic ion and neutral loss strings
+        /// </summary>
+        /// <param name="oneEntry"></param>
+        /// <returns></returns>
+        public static Dictionary<DissociationType, List<double>> DiagnosticIonsAndNeutralLosses(string oneEntry, Dictionary<DissociationType, List<double>> dAndNDictionary)
+        {
+            try
+            {
+                string[] nlOrDiEntries = oneEntry.Split(new string[] { " or " }, StringSplitOptions.None);
+                foreach (string nlOrDiEntry in nlOrDiEntries)
+                {
+                    string[] entryKeyValue = nlOrDiEntry.Split(new string[] { ":" }, StringSplitOptions.RemoveEmptyEntries);
+                    if (entryKeyValue.Length == 1) // assume there is no dissociation type listed and only formula or mass are supplied
+                    {
+                        double mm;
+                        try
+                        {
+                            mm = ChemicalFormula.ParseFormula(entryKeyValue[0]).MonoisotopicMass; // turn chemical formula into monoisotopic mass
+                        }
+                        catch
+                        {
+                            mm = double.Parse(entryKeyValue[0], CultureInfo.InvariantCulture);
+                        }
+
+                        dAndNDictionary.TryGetValue(DissociationType.AnyActivationType, out List<double> val); // check the dictionary to see if AnyActivationType is already listed in the keys,
+                        if (val != null)
+                        {
+                            dAndNDictionary[DissociationType.AnyActivationType].Add(mm);
+                        }
+                        else
+                        {
+                            dAndNDictionary.Add(DissociationType.AnyActivationType, new List<double> { mm });
+                        }
+                    }
+                    else if (entryKeyValue.Length == 2)  // an entry with two values is assumed to have a dissociation type and a neutral loss formula or mass
+                    {
+                        DissociationType? dt = ModDissociationType(entryKeyValue[0]);
+                        if (dt != null)
+                        {
+                            //try // see if dictionary already contains key AnyActivationType
+                            //{
+                            double mm;
+                            try
+                            {
+                                mm = ChemicalFormula.ParseFormula(entryKeyValue[1]).MonoisotopicMass; // turn chemical formula into monoisotopic mass
+                            }
+                            catch
+                            {
+                                mm = double.Parse(entryKeyValue[1], CultureInfo.InvariantCulture);
+                            }
+
+                            dAndNDictionary.TryGetValue((DissociationType)dt, out List<double> val); // check the dictionary to see if AnyActivationType is already listed in the keys,
+                            if (val != null)
+                            {
+                                dAndNDictionary[(DissociationType)dt].Add(mm);
+                            }
+                            else
+                            {
+                                dAndNDictionary.Add((DissociationType)dt, new List<double> { mm });
+                            }
+                        }
+                        else
+                        {
+                            throw new MzLibException("neutral loss or diagnostic ion entry dissociation type is not parsable");
+                        }
+                    }
+                    else
+                    {
+                        throw new MzLibException("your neutral loss or diagnostic ion is junk");
+                    }
+                }
+            }
+            catch
+            {
+                dAndNDictionary = null; // must have run into some junk
+            }
+
+            return dAndNDictionary;
         }
     }
 }
